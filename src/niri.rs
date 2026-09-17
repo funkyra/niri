@@ -153,6 +153,7 @@ use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
 use crate::niri_render_elements;
+use crate::protocols::appmenu::AppMenuManagerState;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -329,6 +330,7 @@ pub struct Niri {
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
     pub activation_state: XdgActivationState,
+    pub appmenu_manager_state: AppMenuManagerState,
     pub mutter_x11_interop_state: MutterX11InteropManagerState,
 
     // This will not work as is outside of tests, so it is gated with #[cfg(test)] for now. In
@@ -2519,6 +2521,7 @@ impl Niri {
             )
             .unwrap();
 
+        let appmenu_manager_state = AppMenuManagerState::new::<State>(&display_handle);
         let mutter_x11_interop_state =
             MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
 
@@ -2720,6 +2723,7 @@ impl Niri {
             security_context_state,
             gamma_control_manager_state,
             activation_state,
+            appmenu_manager_state,
             mutter_x11_interop_state,
             #[cfg(test)]
             single_pixel_buffer_state,

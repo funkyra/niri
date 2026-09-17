@@ -70,6 +70,7 @@ use crate::input::click_grab::ClickGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{ActivateWindow, LayoutElement};
 use crate::niri::{DndIcon, NewClient, State};
+use crate::protocols::appmenu::AppMenuHandler;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
@@ -857,3 +858,5 @@ impl OutputManagementHandler for State {
 }
 
 impl MutterX11InteropHandler for State {}
+
+impl AppMenuHandler for State {}
