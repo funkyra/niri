@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{mem, slice};
 
-use anyhow::{ensure, Context as _};
+use anyhow::{bail, ensure, Context as _};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::RegistrationToken;
 use pipewire::context::ContextRc;
@@ -36,7 +36,6 @@ use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmBuffer, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::backend::renderer::element::{Element, RenderElement, RenderElementStates};
@@ -52,7 +51,7 @@ use smithay::reexports::rustix::fs::{
     fcntl_add_seals, ftruncate, memfd_create, MemfdFlags, SealFlags,
 };
 use smithay::reexports::rustix::mm::{mmap, munmap, MapFlags, ProtFlags};
-use smithay::utils::{Logical, Physical, Point, Scale, Size, Transform};
+use smithay::utils::{DeviceFd, Logical, Physical, Point, Scale, Size, Transform};
 use zbus::object_server::SignalEmitter;
 
 use crate::dbus::mutter_screen_cast::{self, CursorMode};
@@ -400,8 +399,7 @@ impl PipeWire {
     #[allow(clippy::too_many_arguments)]
     pub fn start_cast(
         &self,
-        gbm: GbmDevice<DrmDeviceFd>,
-        formats: FormatSet,
+        gbm: Option<(GbmDevice<DeviceFd>, FormatSet)>,
         session_id: CastSessionId,
         stream_id: CastStreamId,
         target: CastTarget,
@@ -412,17 +410,18 @@ impl PipeWire {
         signal_ctx: SignalEmitter<'static>,
     ) -> anyhow::Result<Cast> {
         let _span = tracy_client::span!("PipeWire::start_cast");
+        let _span = debug_span!("start_cast", %session_id).entered();
 
         let to_niri_ = self.to_niri.clone();
         let stop_cast = move || {
             if let Err(err) = to_niri_.send(PwToNiri::StopCast { session_id }) {
-                warn!(%session_id, "error sending StopCast to niri: {err:?}");
+                warn!("error sending StopCast to niri: {err:?}");
             }
         };
         let to_niri_ = self.to_niri.clone();
         let redraw = move || {
             if let Err(err) = to_niri_.send(PwToNiri::Redraw { stream_id }) {
-                warn!(%stream_id, "error sending Redraw to niri: {err:?}");
+                warn!("error sending Redraw to niri: {err:?}");
             }
         };
         let redraw_ = redraw.clone();
@@ -443,6 +442,13 @@ impl PipeWire {
         }
 
         let pending_size = Size::from((size.w as u32, size.h as u32));
+
+        let (gbm, formats) = if let Some((gbm, formats)) = gbm {
+            (Some(gbm), formats)
+        } else {
+            debug!("no gbm device; advertising only shm formats");
+            (None, FormatSet::default())
+        };
 
         // Like in good old wayland-rs times...
         let inner = Rc::new(RefCell::new(CastInner {
@@ -596,6 +602,12 @@ impl PipeWire {
                             {
                                 debug!("fixating the modifier");
 
+                                let Some(gbm) = &gbm else {
+                                    error!("negotiated dmabuf without gbm");
+                                    stop_cast();
+                                    return;
+                                };
+
                                 let pod_modifier = prop_modifier.value();
                                 let Ok((_, modifiers)) =
                                     PodDeserializer::deserialize_from::<Choice<i64>>(
@@ -614,7 +626,7 @@ impl PipeWire {
                                 };
 
                                 let (modifier, plane_count) = match find_preferred_modifier(
-                                    &gbm,
+                                    gbm,
                                     format_size,
                                     fourcc,
                                     alternatives,
@@ -717,10 +729,16 @@ impl PipeWire {
                                     dma_negotiation.plane_count
                                 }
                                 _ => {
+                                    let Some(gbm) = &gbm else {
+                                        error!("negotiated dmabuf without gbm");
+                                        stop_cast();
+                                        return;
+                                    };
+
                                     // We're negotiating a single modifier, or alpha or modifier
                                     // changed, so we need to do a test allocation.
                                     let (modifier, plane_count) = match find_preferred_modifier(
-                                        &gbm,
+                                        gbm,
                                         format_size,
                                         fourcc,
                                         vec![format.modifier() as i64],
@@ -873,7 +891,7 @@ impl PipeWire {
                     move |stream, (), buffer| {
                         let _span = debug_span!("add_buffer", %stream_id).entered();
 
-                        match unsafe { inner.borrow_mut().on_add_buffer(&gbm, buffer) } {
+                        match unsafe { inner.borrow_mut().on_add_buffer(gbm.as_ref(), buffer) } {
                             Ok(redraw) => {
                                 // During size re-negotiation, the stream sometimes just keeps
                                 // running, in which case we may need to force a redraw once we got
@@ -902,10 +920,7 @@ impl PipeWire {
                 .register()
                 .unwrap();
 
-        trace!(
-            %stream_id,
-            "starting pw stream with size={pending_size:?}, refresh={refresh:?}"
-        );
+        trace!("starting pw stream with size={pending_size:?}, refresh={refresh:?}");
 
         make_params!(params, &formats, pending_size, refresh, alpha);
         stream
@@ -1374,7 +1389,7 @@ impl Cast {
 impl CastInner {
     unsafe fn on_add_buffer(
         &mut self,
-        gbm: &GbmDevice<DrmDeviceFd>,
+        gbm: Option<&GbmDevice<DeviceFd>>,
         buffer: *mut pw_buffer,
     ) -> anyhow::Result<bool> {
         let CastState::Ready {
@@ -1394,6 +1409,12 @@ impl CastInner {
                     "pw stream: add_buffer (dma), size={size:?}, \
                      alpha={alpha}, modifier={modifier:?}"
                 );
+
+                let Some(gbm) = gbm else {
+                    error!("add_buffer(dma) without gbm");
+                    bail!("missing gbm");
+                };
+
                 unsafe {
                     let spa_buffer = (*buffer).buffer;
 
@@ -1531,7 +1552,7 @@ fn make_pod(buffer: &mut Vec<u8>, object: pod::Object) -> &Pod {
 }
 
 fn find_preferred_modifier(
-    gbm: &GbmDevice<DrmDeviceFd>,
+    gbm: &GbmDevice<DeviceFd>,
     size: Size<u32, Physical>,
     fourcc: Fourcc,
     modifiers: Vec<i64>,
@@ -1551,7 +1572,7 @@ fn find_preferred_modifier(
 }
 
 fn allocate_buffer(
-    gbm: &GbmDevice<DrmDeviceFd>,
+    gbm: &GbmDevice<DeviceFd>,
     size: Size<u32, Physical>,
     fourcc: Fourcc,
     modifiers: &[i64],
@@ -1583,7 +1604,7 @@ fn allocate_buffer(
 }
 
 fn allocate_dmabuf(
-    gbm: &GbmDevice<DrmDeviceFd>,
+    gbm: &GbmDevice<DeviceFd>,
     size: Size<u32, Physical>,
     fourcc: Fourcc,
     modifier: Modifier,

@@ -173,11 +173,10 @@ impl Backend {
     #[cfg(feature = "xdp-gnome-screencast")]
     pub fn gbm_device(
         &self,
-    ) -> Option<smithay::backend::allocator::gbm::GbmDevice<smithay::backend::drm::DrmDeviceFd>>
-    {
+    ) -> Option<smithay::backend::allocator::gbm::GbmDevice<smithay::utils::DeviceFd>> {
         match self {
             Backend::Tty(tty) => tty.primary_gbm_device(),
-            Backend::Winit(_) => None,
+            Backend::Winit(winit) => winit.gbm_device(),
             Backend::Headless(_) => None,
         }
     }
