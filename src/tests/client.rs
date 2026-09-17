@@ -32,6 +32,8 @@ use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+use wayland_protocols_plasma::appmenu::client::org_kde_kwin_appmenu::OrgKdeKwinAppmenu;
+use wayland_protocols_plasma::appmenu::client::org_kde_kwin_appmenu_manager::OrgKdeKwinAppmenuManager;
 
 use crate::utils::id::IdCounter;
 
@@ -50,6 +52,7 @@ pub struct State {
     pub globals: Vec<Global>,
     pub outputs: HashMap<WlOutput, String>,
 
+    pub appmenu_manager: Option<OrgKdeKwinAppmenuManager>,
     pub compositor: Option<WlCompositor>,
     pub xdg_wm_base: Option<XdgWmBase>,
     pub layer_shell: Option<ZwlrLayerShellV1>,
@@ -176,6 +179,7 @@ impl Client {
             qh: qh.clone(),
             globals: Vec::new(),
             outputs: HashMap::new(),
+            appmenu_manager: None,
             compositor: None,
             xdg_wm_base: None,
             layer_shell: None,
@@ -503,7 +507,9 @@ impl Dispatch<WlRegistry, ()> for State {
                 interface,
                 version,
             } => {
-                if interface == WlCompositor::interface().name {
+                if interface == OrgKdeKwinAppmenuManager::interface().name {
+                    state.appmenu_manager = Some(registry.bind(name, 2, qh, ()));
+                } else if interface == WlCompositor::interface().name {
                     let version = min(version, WlCompositor::interface().version);
                     state.compositor = Some(registry.bind(name, version, qh, ()));
                 } else if interface == XdgWmBase::interface().name {
@@ -775,3 +781,6 @@ impl Dispatch<WpViewport, ()> for State {
         unreachable!()
     }
 }
+
+wayland_client::delegate_noop!(State: ignore OrgKdeKwinAppmenuManager);
+wayland_client::delegate_noop!(State: ignore OrgKdeKwinAppmenu);
